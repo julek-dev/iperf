@@ -183,6 +183,10 @@ struct iperf_settings
     char      *client_username;
     char      *client_password;
     EVP_PKEY  *client_rsa_pubkey;
+    /* DTLS 1.2 per-test settings */
+    char      *dtls_cert;           /* --dtls-cert (server only) */
+    char      *dtls_key;            /* --dtls-key  (server only) */
+    char      *dtls_ca;             /* --dtls-ca   (client verify, optional) */
 #endif // HAVE_SSL
     int       skip_rx_copy;         /* Whether to ignore received messages data, using MSG_TRUNC option */
     int	      connect_timeout;	    /* socket connection timeout, in ms */
@@ -260,6 +264,9 @@ struct iperf_stream
 //    struct iperf_stream *next;
     SLIST_ENTRY(iperf_stream) streams;
 
+#if defined(HAVE_DTLS)
+    void     *ssl;              /* per-stream SSL* (opaque) for DTLS */
+#endif
     void     *data;
 };
 
@@ -349,6 +356,10 @@ struct iperf_test
     int       server_skew_threshold;
     int       use_pkcs1_padding;
 #endif // HAVE_SSL
+#if defined(HAVE_DTLS)
+    void      *dtls_ctx;                        /* SSL_CTX* (opaque) shared by all DTLS streams */
+    void      *dtls_pending_ssl;                /* SSL* (opaque) handed off from connect/accept to the next new stream */
+#endif
 
     /* boolean variables for Options */
     int       daemon;                           /* -D option */

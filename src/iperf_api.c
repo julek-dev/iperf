@@ -81,6 +81,7 @@
 #if defined(HAVE_SCTP_H)
 #include "iperf_sctp.h"
 #endif /* HAVE_SCTP_H */
+#include "iperf_dtls.h"
 #include "timer.h"
 
 #include "cjson.h"
@@ -1161,6 +1162,12 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
         {"nstreams", required_argument, NULL, OPT_NUMSTREAMS},
         {"xbind", required_argument, NULL, 'X'},
 #endif
+#if defined(HAVE_DTLS)
+        {"dtls", no_argument, NULL, OPT_DTLS},
+        {"dtls-cert", required_argument, NULL, OPT_DTLS_CERT},
+        {"dtls-key", required_argument, NULL, OPT_DTLS_KEY},
+        {"dtls-ca", required_argument, NULL, OPT_DTLS_CA},
+#endif
 	{"pidfile", required_argument, NULL, 'I'},
 	{"logfile", required_argument, NULL, OPT_LOGFILE},
 	{"forceflush", no_argument, NULL, OPT_FORCEFLUSH},
@@ -1332,6 +1339,33 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
                 i_errno = IEUNIMP;
                 return -1;
 #endif /* HAVE_SCTP_H */
+
+#if defined(HAVE_DTLS)
+            case OPT_DTLS:
+                /* --dtls is valid on both sides: the server uses it to
+                 * indicate DTLS mode (plus --dtls-cert/--dtls-key);
+                 * the client uses it to request a DTLS data path. */
+                set_protocol(test, Pdtls);
+                break;
+            case OPT_DTLS_CERT:
+                if (test->settings->dtls_cert)
+                    free(test->settings->dtls_cert);
+                test->settings->dtls_cert = strdup(optarg);
+                server_flag = 1;
+                break;
+            case OPT_DTLS_KEY:
+                if (test->settings->dtls_key)
+                    free(test->settings->dtls_key);
+                test->settings->dtls_key = strdup(optarg);
+                server_flag = 1;
+                break;
+            case OPT_DTLS_CA:
+                if (test->settings->dtls_ca)
+                    free(test->settings->dtls_ca);
+                test->settings->dtls_ca = strdup(optarg);
+                client_flag = 1;
+                break;
+#endif /* HAVE_DTLS */
 
             case OPT_NUMSTREAMS:
 #if defined(linux) || defined(__FreeBSD__)
@@ -1918,25 +1952,25 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
      * header (packet number, etc.). Specifying Pudp here implies this is
      * on the client side.
      */
-    if (test->diskfile_name != (char*) 0 && test->protocol->id == Pudp) {
+    if (test->diskfile_name != (char*) 0 && PROTO_IS_UDP_LIKE(test->protocol->id)) {
         i_errno = IEUDPFILETRANSFER;
         return -1;
     }
 
     if (blksize == 0) {
-	if (test->protocol->id == Pudp)
+	if (PROTO_IS_UDP_LIKE(test->protocol->id))
 	    blksize = 0;	/* try to dynamically determine from MSS */
 	else if (test->protocol->id == Psctp)
 	    blksize = DEFAULT_SCTP_BLKSIZE;
 	else
 	    blksize = DEFAULT_TCP_BLKSIZE;
     }
-    if ((test->protocol->id != Pudp && blksize <= 0)
+    if ((!PROTO_IS_UDP_LIKE(test->protocol->id) && blksize <= 0)
 	|| blksize > MAX_BLOCKSIZE) {
 	i_errno = IEBLOCKSIZE;
 	return -1;
     }
-    if (test->protocol->id == Pudp &&
+    if (PROTO_IS_UDP_LIKE(test->protocol->id) &&
 	(blksize > 0 &&
 	    (blksize < MIN_UDP_BLOCKSIZE || blksize > MAX_UDP_BLOCKSIZE))) {
 	i_errno = IEUDPBLOCKSIZE;
@@ -1957,7 +1991,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
     test->settings->blksize = blksize;
 
     if (!rate_flag)
-	test->settings->rate = test->protocol->id == Pudp ? UDP_RATE : 0;
+	test->settings->rate = PROTO_IS_UDP_LIKE(test->protocol->id) ? UDP_RATE : 0;
 
     /* if no bytes or blocks specified, nor a duration_flag, and we have -F,
     ** get the file-size as the bytes count to be transferred
@@ -2429,6 +2463,10 @@ send_parameters(struct iperf_test *test)
 	    cJSON_AddTrueToObject(j, "udp");
         else if (test->protocol->id == Psctp)
             cJSON_AddTrueToObject(j, "sctp");
+#if defined(HAVE_DTLS)
+        else if (test->protocol->id == Pdtls)
+            cJSON_AddTrueToObject(j, "dtls");
+#endif
 	cJSON_AddNumberToObject(j, "omit", test->omit);
 	if (test->server_affinity != -1)
 	    cJSON_AddNumberToObject(j, "server_affinity", test->server_affinity);
@@ -2563,6 +2601,10 @@ get_parameters(struct iperf_test *test)
         }
         if ((j_p = iperf_cJSON_GetObjectItemType(j, "sctp", cJSON_True)) != NULL)
             set_protocol(test, Psctp);
+#if defined(HAVE_DTLS)
+        if ((j_p = iperf_cJSON_GetObjectItemType(j, "dtls", cJSON_True)) != NULL)
+            set_protocol(test, Pdtls);
+#endif
 	if ((j_p = iperf_cJSON_GetObjectItemType(j, "omit", cJSON_Number)) != NULL)
 	    test->omit = j_p->valueint;
 	if ((j_p = iperf_cJSON_GetObjectItemType(j, "server_affinity", cJSON_Number)) != NULL)
@@ -3375,6 +3417,26 @@ iperf_defaults(struct iperf_test *testp)
     SLIST_INSERT_AFTER(udp, sctp, protocols);
 #endif /* HAVE_SCTP_H */
 
+#if defined(HAVE_DTLS)
+    {
+        struct protocol *dtls = protocol_new();
+        if (!dtls) {
+            protocol_free(tcp);
+            protocol_free(udp);
+            return -1;
+        }
+        dtls->id = Pdtls;
+        dtls->name = "DTLS";
+        dtls->accept = iperf_dtls_accept;
+        dtls->listen = iperf_dtls_listen;
+        dtls->connect = iperf_dtls_connect;
+        dtls->send = iperf_dtls_send;
+        dtls->recv = iperf_dtls_recv;
+        dtls->init = iperf_dtls_init;
+        SLIST_INSERT_AFTER(udp, dtls, protocols);
+    }
+#endif /* HAVE_DTLS */
+
     testp->on_new_stream = iperf_on_new_stream;
     testp->on_test_start = iperf_on_test_start;
     testp->on_connect = iperf_on_connect;
@@ -3437,7 +3499,24 @@ iperf_free_test(struct iperf_test *test)
     if (test->settings->client_rsa_pubkey)
       EVP_PKEY_free(test->settings->client_rsa_pubkey);
     test->settings->client_rsa_pubkey = NULL;
+
+    if (test->settings->dtls_cert) {
+        free(test->settings->dtls_cert);
+        test->settings->dtls_cert = NULL;
+    }
+    if (test->settings->dtls_key) {
+        free(test->settings->dtls_key);
+        test->settings->dtls_key = NULL;
+    }
+    if (test->settings->dtls_ca) {
+        free(test->settings->dtls_ca);
+        test->settings->dtls_ca = NULL;
+    }
 #endif /* HAVE_SSL */
+
+#if defined(HAVE_DTLS)
+    iperf_dtls_ctx_free(test);
+#endif
 
     if (test->settings)
     free(test->settings);
@@ -4763,6 +4842,10 @@ iperf_free_stream(struct iperf_stream *sp)
 {
     struct iperf_interval_results *irp, *nirp;
 
+#if defined(HAVE_DTLS)
+    iperf_dtls_stream_free(sp);
+#endif
+
     /* XXX: need to free interval list too! */
     munmap(sp->buffer, sp->test->settings->blksize);
     close(sp->buffer_fd);
@@ -4868,6 +4951,18 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
     /* Set socket */
     sp->socket = s;
 
+#if defined(HAVE_DTLS)
+    /*
+     * DTLS accept/connect produced an SSL* for the just-accepted/just-
+     * connected peer; adopt it into this new stream.  One handoff per
+     * new stream, since iperf creates exactly one stream per accept().
+     */
+    if (test->protocol->id == Pdtls && test->dtls_pending_ssl != NULL) {
+        sp->ssl = test->dtls_pending_ssl;
+        test->dtls_pending_ssl = NULL;
+    }
+#endif
+
     sp->snd = test->protocol->send;
     sp->rcv = test->protocol->recv;
 
@@ -4960,8 +5055,8 @@ iperf_init_stream(struct iperf_stream *sp, struct iperf_test *test)
     }
 
 #if defined(HAVE_DONT_FRAGMENT)
-    /* Set Don't Fragment (DF). Only applicable to IPv4/UDP tests. */
-    if (iperf_get_test_protocol_id(test) == Pudp &&
+    /* Set Don't Fragment (DF). Only applicable to IPv4/UDP(-like) tests. */
+    if (PROTO_IS_UDP_LIKE(iperf_get_test_protocol_id(test)) &&
         getsockdomain(sp->socket) == AF_INET &&
         iperf_get_dont_fragment(test)) {
 

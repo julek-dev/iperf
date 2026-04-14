@@ -63,6 +63,11 @@ typedef atomic_uint_fast64_t atomic_iperf_size_t;
 #define Ptcp SOCK_STREAM
 #define Pudp SOCK_DGRAM
 #define Psctp 12
+#define Pdtls 13
+/* DTLS shares UDP datagram-style semantics (jitter/loss accounting,
+ * blksize defaults, no file transfer, ...).  Use this helper instead
+ * of bare `== Pudp` where both should apply. */
+#define PROTO_IS_UDP_LIKE(id) ((id) == Pudp || (id) == Pdtls)
 #define DEFAULT_UDP_BLKSIZE 1460 /* default is dynamically set, else this */
 #define DEFAULT_TCP_BLKSIZE (128 * 1024)  /* default read/write block size */
 #define DEFAULT_SCTP_BLKSIZE (64 * 1024)
@@ -107,6 +112,10 @@ typedef atomic_uint_fast64_t atomic_iperf_size_t;
 #define OPT_JSON_STREAM_FULL_OUTPUT 33
 #define OPT_SERVER_MAX_DURATION 34
 #define OPT_GSRO 35
+#define OPT_DTLS 36
+#define OPT_DTLS_CERT 37
+#define OPT_DTLS_KEY 38
+#define OPT_DTLS_CA 39
 
 /* states */
 #define TEST_START 1
@@ -519,6 +528,14 @@ enum {
     /* Timer errors */
     IENEWTIMER = 300,       // Unable to create new timer (check perror)
     IEUPDATETIMER = 301,    // Unable to update timer (check perror)
+    /* DTLS errors */
+    IEDTLSCTX = 400,        // Unable to create DTLS SSL context
+    IEDTLSCERT = 401,       // Unable to load DTLS certificate
+    IEDTLSKEY = 402,        // Unable to load DTLS private key
+    IEDTLSHANDSHAKE = 403,  // DTLS handshake failed
+    IEDTLSWRITE = 404,      // DTLS write failed
+    IEDTLSREAD = 405,       // DTLS read failed
+    IEDTLSMISSINGCERT = 406, // --dtls requires --dtls-cert and --dtls-key on server
 };
 
 

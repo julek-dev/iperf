@@ -509,7 +509,7 @@ iperf_connect(struct iperf_test *test)
      * directions.  Note that even if the algorithm guesses wrong,
      * the user always has the option to override.
      */
-    if (test->protocol->id == Pudp) {
+    if (PROTO_IS_UDP_LIKE(test->protocol->id)) {
 	if (test->settings->blksize == 0) {
 	    if (test->ctrl_sck_mss) {
 		test->settings->blksize = test->ctrl_sck_mss;

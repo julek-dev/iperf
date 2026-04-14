@@ -29,6 +29,8 @@ libiperf_la_SOURCES     = \
                         iperf_udp.h \
                         iperf_sctp.c \
                         iperf_sctp.h \
+                        iperf_dtls.c \
+                        iperf_dtls.h \
                         iperf_util.c \
                         iperf_util.h \
                         iperf_time.c \
@@ -99,7 +101,10 @@ TESTS                   = \
                         t_units \
                         t_uuid  \
                         t_api \
-			t_auth
+			t_auth \
+                        dtls_test.sh
+
+EXTRA_DIST              = dtls_test.sh
 
 dist_man_MANS          = iperf3.1 libiperf.3
 

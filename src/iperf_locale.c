@@ -167,6 +167,12 @@ const char usage_longstr[] = "Usage: iperf3 [-s|-c host] [options]\n"
                            "  -X, --xbind <name>        bind SCTP association to links\n"
                            "  --nstreams      #         number of SCTP streams\n"
 #endif /* HAVE_SCTP_H */
+#if defined(HAVE_DTLS)
+                           "  --dtls                    use DTLS 1.2 over UDP\n"
+                           "  --dtls-cert <file>        DTLS server certificate (PEM)\n"
+                           "  --dtls-key <file>         DTLS server private key (PEM)\n"
+                           "  --dtls-ca <file>          DTLS client CA bundle (PEM, optional)\n"
+#endif /* HAVE_DTLS */
                            "  -u, --udp                 use UDP rather than TCP\n"
                            "  --connect-timeout #       timeout for control connection setup (ms)\n"
                            "  -b, --bitrate #[KMG][/#]  target bitrate in bits/sec (0 for unlimited)\n"

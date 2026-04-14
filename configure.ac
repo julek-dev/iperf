@@ -27,6 +27,7 @@
 AC_PREREQ([2.71])
 AC_INIT([iperf],[3.21+],[https://github.com/esnet/iperf],[iperf],[https://software.es.net/iperf/])
 m4_include([config/ax_check_openssl.m4])
+m4_include([config/ax_check_wolfssl.m4])
 m4_include([config/ax_pthread.m4])
 m4_include([config/iperf_config_static_bin.m4])
 AC_LANG(C)
@@ -168,11 +169,34 @@ AC_CHECK_HEADER([endian.h],
 				)
 		)
 
-if test "x$with_openssl" = "xno"; then
+# SSL detection.  Default path is OpenSSL.  If --with-wolfssl[=DIR] is
+# given, iperf is built against wolfSSL's OpenSSL compatibility layer
+# instead (iperf's source code uses only the OpenSSL API; the compat
+# layer routes <openssl/*.h> to wolfSSL shims at compile time).
+AC_ARG_WITH([wolfssl],
+    [AS_HELP_STRING([--with-wolfssl@<:@=DIR@:>@],
+        [build against wolfSSL via OpenSSL compatibility layer instead of OpenSSL])])
+
+have_ssl=false
+
+if test "x$with_wolfssl" != "x" -a "x$with_wolfssl" != "xno"; then
+    if test "x$with_openssl" != "x" -a "x$with_openssl" != "xno"; then
+        AC_MSG_ERROR([--with-openssl and --with-wolfssl are mutually exclusive])
+    fi
+    AX_CHECK_WOLFSSL(
+        [ AC_DEFINE([HAVE_SSL], [1], [SSL (OpenSSL-compat) is available])
+          have_ssl=true ],
+        [ AC_MSG_FAILURE([--with-wolfssl was given, but test for wolfSSL failed]) ]
+    )
+    if $have_ssl; then
+        LDFLAGS="$LDFLAGS $WOLFSSL_LDFLAGS"
+        LIBS="$WOLFSSL_LIBS $LIBS"
+        CPPFLAGS="$WOLFSSL_INCLUDES $CPPFLAGS"
+    fi
+elif test "x$with_openssl" = "xno"; then
     AC_MSG_WARN( [Building without OpenSSL; disabling iperf_auth functionality.] )
 else
     # Check for OPENSSL support
-    have_ssl=false
     AX_CHECK_OPENSSL(
         [ AC_DEFINE([HAVE_SSL], [1], [OpenSSL Is Available])
           have_ssl=true ],
@@ -189,6 +213,29 @@ else
         LDFLAGS="$LDFLAGS $OPENSSL_LDFLAGS"
         LIBS="$OPENSSL_LIBS $LIBS"
         CPPFLAGS="$OPENSSL_INCLUDES $CPPFLAGS"
+    fi
+fi
+
+# DTLS 1.2 support is available whenever either SSL backend is.
+if $have_ssl; then
+    AC_DEFINE([HAVE_DTLS], [1], [DTLS 1.2 support available])
+
+    # Feature-detect the OpenSSL DTLS cookie API.  OpenSSL exports it;
+    # some OpenSSL-compatible SSL libraries don't.  When missing, iperf
+    # simply skips the source-IP cookie verification in SSL_accept
+    # (loopback perf-testing doesn't need DoS mitigation).
+    AC_CACHE_CHECK([for DTLS cookie API (SSL_CTX_set_cookie_generate_cb)],
+    [iperf3_cv_dtls_cookies],
+    [save_LIBS2="$LIBS"; save_CPPFLAGS2="$CPPFLAGS"
+     AC_LINK_IFELSE(
+        [AC_LANG_PROGRAM([[#include <openssl/ssl.h>]],
+                         [[SSL_CTX_set_cookie_generate_cb((SSL_CTX *)0,0);
+                           SSL_CTX_set_cookie_verify_cb((SSL_CTX *)0,0);]])],
+        [iperf3_cv_dtls_cookies=yes],
+        [iperf3_cv_dtls_cookies=no])
+     LIBS="$save_LIBS2"; CPPFLAGS="$save_CPPFLAGS2"])
+    if test "x$iperf3_cv_dtls_cookies" = "xyes"; then
+        AC_DEFINE([HAVE_DTLS_COOKIES], [1], [OpenSSL DTLS cookie callbacks available])
     fi
 fi
 

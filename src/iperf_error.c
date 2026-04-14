@@ -453,6 +453,27 @@ iperf_strerror(int int_errno)
             snprintf(errstr, len, "unable to update timer");
             perr = 1;
             break;
+        case IEDTLSCTX:
+            snprintf(errstr, len, "unable to create DTLS SSL context");
+            break;
+        case IEDTLSCERT:
+            snprintf(errstr, len, "unable to load DTLS certificate");
+            break;
+        case IEDTLSKEY:
+            snprintf(errstr, len, "unable to load DTLS private key");
+            break;
+        case IEDTLSHANDSHAKE:
+            snprintf(errstr, len, "DTLS handshake failed");
+            break;
+        case IEDTLSWRITE:
+            snprintf(errstr, len, "DTLS write failed");
+            break;
+        case IEDTLSREAD:
+            snprintf(errstr, len, "DTLS read failed");
+            break;
+        case IEDTLSMISSINGCERT:
+            snprintf(errstr, len, "DTLS server requires --dtls-cert and --dtls-key");
+            break;
         case IESETCONGESTION:
             snprintf(errstr, len, "unable to set TCP_CONGESTION: "
                                   "Supplied congestion control algorithm not supported on this host");

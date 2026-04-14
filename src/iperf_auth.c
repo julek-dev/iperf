@@ -111,49 +111,75 @@ int check_authentication(const char *username, const char *password, const time_
 
 
 int Base64Encode(const unsigned char* buffer, const size_t length, char** b64text) { //Encodes a binary safe base 64 string
-    BIO *bio, *b64;
-    BUF_MEM *bufferPtr;
+    /*
+     * Use EVP_EncodeBlock instead of the BIO_f_base64 chain: the BIO
+     * pattern's ownership semantics differ between OpenSSL and
+     * OpenSSL-compatible stacks (wolfSSL's BIO_new_mem_buf over a
+     * caller-owned buffer, for example, can cause BIO_free_all to
+     * free an interior pointer).  EVP_EncodeBlock takes no BIO at
+     * all, so there is no chain to tear down.
+     *
+     * Output size for one-shot base64 without newlines:
+     *   ceil(length / 3) * 4, plus NUL terminator that EVP_EncodeBlock
+     *   writes for us.
+     */
+    size_t out_len = ((length + 2) / 3) * 4 + 1;
+    unsigned char *out = (unsigned char *) malloc(out_len);
+    if (!out)
+        return -1;
 
-    b64 = BIO_new(BIO_f_base64());
-    bio = BIO_new(BIO_s_mem());
-    bio = BIO_push(b64, bio);
-
-    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL); //Ignore newlines - write everything in one line
-    BIO_write(bio, buffer, length);
-    BIO_flush(bio);
-    BIO_get_mem_ptr(bio, &bufferPtr);
-    *b64text = strndup( (*bufferPtr).data, (*bufferPtr).length );
-    BIO_free_all(bio);
-
-    return (0); //success
-}
-
-size_t calcDecodeLength(const char* b64input) { //Calculates the length of a decoded string
-    size_t len = strlen(b64input), padding = 0;
-    if (len >= 2 && b64input[len-1] == '=' && b64input[len-2] == '=') //last two chars are =
-        padding = 2;
-    else if (len >= 1 && b64input[len-1] == '=') //last char is =
-        padding = 1;
-
-    return (len*3)/4 - padding;
+    int n = EVP_EncodeBlock(out, buffer, (int) length);
+    if (n < 0) {
+        free(out);
+        return -1;
+    }
+    *b64text = (char *) out;
+    return 0; //success
 }
 
 int Base64Decode(const char* b64message, unsigned char** buffer, size_t* length) { //Decodes a base64 encoded string
-    BIO *bio, *b64;
+    /*
+     * Use EVP_DecodeBlock for the same reason as Base64Encode above:
+     * the previous BIO_new_mem_buf / BIO_push / BIO_free_all chain
+     * has divergent ownership rules across OpenSSL implementations.
+     *
+     * EVP_DecodeBlock requires the input length to be a multiple of
+     * 4 and returns the decoded length *including* any bytes
+     * produced by '=' padding, which we then strip.
+     */
+    size_t in_len = strlen(b64message);
+    if (in_len == 0 || (in_len % 4) != 0)
+        return -1;
 
-    int decodeLen = calcDecodeLength(b64message);
-    *buffer = (unsigned char*)malloc(decodeLen + 1);
-    (*buffer)[decodeLen] = '\0';
+    size_t out_cap = (in_len / 4) * 3;
+    unsigned char *out = (unsigned char *) malloc(out_cap + 1);
+    if (!out)
+        return -1;
 
-    bio = BIO_new_mem_buf(b64message, -1);
-    b64 = BIO_new(BIO_f_base64());
-    bio = BIO_push(b64, bio);
+    int n = EVP_DecodeBlock(out, (const unsigned char *) b64message, (int) in_len);
+    if (n < 0) {
+        free(out);
+        return -1;
+    }
 
-    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL); //Do not use newlines to flush buffer
-    *length = BIO_read(bio, *buffer, strlen(b64message));
-    BIO_free_all(bio);
+    size_t padding = 0;
+    if (in_len >= 2 && b64message[in_len - 1] == '=' && b64message[in_len - 2] == '=')
+        padding = 2;
+    else if (in_len >= 1 && b64message[in_len - 1] == '=')
+        padding = 1;
 
-    return (0); //success
+    /*
+     * Use the padding-adjusted capacity as the output length rather
+     * than the EVP_DecodeBlock return value: OpenSSL counts the
+     * zero-bytes produced by '=' padding in its return (so n == out_cap),
+     * wolfSSL's compat layer returns the post-strip data length (n ==
+     * out_cap - padding).  Both write the same data bytes; only the
+     * returned count disagrees.  Computing from padding is portable.
+     */
+    *length = out_cap - padding;
+    out[*length] = '\0';
+    *buffer = out;
+    return 0; //success
 }
 
 EVP_PKEY *load_pubkey_from_file(const char *file) {

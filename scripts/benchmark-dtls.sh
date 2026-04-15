@@ -209,6 +209,8 @@ run_once() {
     local port=$((18000 + RANDOM % 1000))
     local cli_json="${RESULTS_DIR}/${label}_${tag}_cli.json"
     local srv_json="${RESULTS_DIR}/${label}_${tag}_srv.json"
+    local cli_err="${RESULTS_DIR}/${label}_${tag}_cli.err"
+    local srv_err="${RESULTS_DIR}/${label}_${tag}_srv.err"
     local srv_args cli_args
     if [ "$proto" = "dtls" ]; then
         srv_args=(-s -p "$port" -J --dtls --dtls-cert "$CERT" --dtls-key "$KEY" -1)
@@ -217,15 +219,23 @@ run_once() {
         srv_args=(-s -p "$port" -J -1)
         cli_args=(-c 127.0.0.1 -p "$port" -J -u -l "$BLKSZ" -b 0 -t "$DUR" $extra_cli)
     fi
-    LD_LIBRARY_PATH="$libpath" $srv_pin "$bin" "${srv_args[@]}" >"$srv_json" 2>/dev/null &
+    LD_LIBRARY_PATH="$libpath" $srv_pin "$bin" "${srv_args[@]}" >"$srv_json" 2>"$srv_err" &
     local pid=$!
     sleep 0.6
-    LD_LIBRARY_PATH="$libpath" $cli_pin "$bin" "${cli_args[@]}" >"$cli_json" 2>/dev/null
+    LD_LIBRARY_PATH="$libpath" $cli_pin "$bin" "${cli_args[@]}" >"$cli_json" 2>"$cli_err"
     local rc=$?
     wait "$pid" 2>/dev/null || true
-    if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -ne 0 ] || [ ! -s "$cli_json" ]; then
         printf '%-16s %-8s  CLIENT FAILED (rc=%d)\n' "$label" "$tag" "$rc"
-        return 1
+        # Surface whatever the iperf3 binary wrote so the user sees why.
+        if [ -s "$cli_err" ]; then
+            sed 's/^/    cli-stderr: /' "$cli_err" | head -5
+        fi
+        if [ -s "$srv_err" ]; then
+            sed 's/^/    srv-stderr: /' "$srv_err" | head -5
+        fi
+        # Don't abort the whole sweep -- other stacks may still work.
+        return 0
     fi
     local line
     line=$(parse_cli_json "$cli_json" 2>/dev/null) || line="ERR|0|0|0|0|0"
@@ -275,6 +285,37 @@ run_parallel_sweep() {
 log "host: $(nproc) logical cores"
 log "bench dir: ${BENCH_DIR}"
 echo
+
+# Quick sanity sweep: 2-second DTLS run per stack so that any
+# "library can't even complete a handshake" problems surface before we
+# commit to 10+ minutes of measurement.
+preflight_dtls_stack() {
+    local label="$1" bin="$2" libpath="$3"
+    local DUR_SAVED="$DUR"
+    DUR=2
+    log "preflight: ${label}"
+    run_once "preflight-${label}" "smoke" "$bin" "$libpath" "" "" "" dtls >/dev/null \
+        || true
+    DUR="$DUR_SAVED"
+    # Sniff whether it wrote a usable JSON
+    local cli_json="${RESULTS_DIR}/preflight-${label}_smoke_cli.json"
+    if [ ! -s "$cli_json" ]; then
+        warn "${label}: no client JSON produced -- stack may be broken"
+        cat "${RESULTS_DIR}/preflight-${label}_smoke_cli.err" 2>/dev/null \
+            | head -8 | sed 's/^/    cli-stderr: /'
+        cat "${RESULTS_DIR}/preflight-${label}_smoke_srv.err" 2>/dev/null \
+            | head -8 | sed 's/^/    srv-stderr: /'
+        return 1
+    fi
+    return 0
+}
+
+if [ "${SKIP_PREFLIGHT:-0}" != 1 ]; then
+    preflight_dtls_stack dtls-openssl3    "$BIN_OPENSSL3"  "$LD_OPENSSL3"   || true
+    preflight_dtls_stack dtls-openssl111  "$BIN_OPENSSL11" "$LD_OPENSSL11"  || true
+    preflight_dtls_stack dtls-wolfssl     "$BIN_WOLFSSL"   "$LD_WOLFSSL"    || true
+    echo
+fi
 
 [ "${SKIP_PINNED:-0}" = 1 ]   || run_pinned_sweep
 [ "${SKIP_PARALLEL:-0}" = 1 ] || run_parallel_sweep

@@ -67,6 +67,28 @@ dtls_report_error(const char *where)
     }
 }
 
+/*
+ * Extended error reporter for SSL_accept / SSL_connect failures.
+ * Prints the SSL_get_error category (so the caller can distinguish
+ * SSL_ERROR_WANT_READ vs. SSL_ERROR_SYSCALL vs. SSL_ERROR_SSL etc.),
+ * errno, and dumps the full error queue via ERR_print_errors_fp.
+ * This is considerably more informative than the single "error state
+ * on socket" string that some OpenSSL-compatible libraries return as
+ * their default stringification of an unspecified SSL failure.
+ */
+static void
+dtls_report_ssl_error(const char *where, SSL *ssl, int rc)
+{
+    int saved_errno = errno;
+    int sslerr = ssl ? SSL_get_error(ssl, rc) : -1;
+    fprintf(stderr,
+            "iperf DTLS: %s failed: rc=%d SSL_get_error=%d errno=%d (%s)\n",
+            where, rc, sslerr, saved_errno, strerror(saved_errno));
+    ERR_print_errors_fp(stderr);
+    /* Also drain the error queue via the older API for back-compat. */
+    dtls_report_error(where);
+}
+
 #ifdef HAVE_DTLS_COOKIES
 static int
 dtls_build_cookie(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len)
@@ -339,11 +361,14 @@ iperf_dtls_accept(struct iperf_test *test)
     SSL_set_options(ssl, SSL_OP_COOKIE_EXCHANGE);
 #endif
 
-    if (SSL_accept(ssl) <= 0) {
-        dtls_report_error("SSL_accept");
-        SSL_free(ssl);
-        i_errno = IEDTLSHANDSHAKE;
-        return -1;
+    {
+        int arc = SSL_accept(ssl);
+        if (arc <= 0) {
+            dtls_report_ssl_error("SSL_accept", ssl, arc);
+            SSL_free(ssl);
+            i_errno = IEDTLSHANDSHAKE;
+            return -1;
+        }
     }
 
     /* Replace the listening socket (matches iperf_udp_accept). */
@@ -430,12 +455,15 @@ iperf_dtls_connect(struct iperf_test *test)
     tv.tv_usec = 0;
     (void) setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    if (SSL_connect(ssl) <= 0) {
-        dtls_report_error("SSL_connect");
-        SSL_free(ssl);
-        close(s);
-        i_errno = IEDTLSHANDSHAKE;
-        return -1;
+    {
+        int crc = SSL_connect(ssl);
+        if (crc <= 0) {
+            dtls_report_ssl_error("SSL_connect", ssl, crc);
+            SSL_free(ssl);
+            close(s);
+            i_errno = IEDTLSHANDSHAKE;
+            return -1;
+        }
     }
 
     /* Mirror the UDP_CONNECT_REPLY handshake (now wrapped in DTLS). */

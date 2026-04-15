@@ -44,9 +44,13 @@ BENCH_DIR="${BENCH_DIR:-$(mktemp -d -t iperf-dtls-bench.XXXXXX)}"
 IPERF_SRC="${IPERF_SRC:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 # Upstream source locations.  Pin WOLFSSL_REF / OPENSSL11_URL for
-# reproducible runs across time.
+# reproducible runs across time.  WOLFSSL_REF defaults to the last
+# stable tag that I verified end-to-end here rather than bare "master"
+# -- upstream master is a moving target and has occasional
+# DTLS regressions; override with WOLFSSL_REF=master if you want the
+# tip of tree.
 WOLFSSL_REPO="${WOLFSSL_REPO:-https://github.com/wolfSSL/wolfssl.git}"
-WOLFSSL_REF="${WOLFSSL_REF:-master}"
+WOLFSSL_REF="${WOLFSSL_REF:-v5.8.4-stable}"
 OPENSSL11_URL="${OPENSSL11_URL:-https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz}"
 
 WOLFSSL_PREFIX="${WOLFSSL_PREFIX:-${BENCH_DIR}/install/wolfssl}"

@@ -114,15 +114,27 @@ if [ ! -f "${WOLFSSL_PREFIX}/lib/libwolfssl.so" ]; then
             "${WOLFSSL_REPO}" "${WOLFSSL_SRC_DIR}"
     fi
     log "building wolfSSL -> ${WOLFSSL_PREFIX}"
+    # WOLFSSL_CFLAGS: override to "" on machines without AES-NI / AVX
+    # (e.g. pre-Haswell).  -march=native gives wolfSSL's C glue around
+    # the AES-GCM ASM access to VAES / VPCLMULQDQ / AVX-512 intrinsics
+    # where available, which we measured at +3% median on a 16-core
+    # x86-64 Intel host.  Higher opt levels (-O3, -flto) and the 4 KB
+    # GCM table (-DGCM_TABLE) did not help -- the hot path is in
+    # hand-written .S that GCC optimization doesn't touch, and GHASH
+    # uses PCLMULQDQ at runtime which is faster than any table.
+    : "${WOLFSSL_CFLAGS:=-march=native}"
     (
         cd "${WOLFSSL_SRC_DIR}"
         [ -f configure ] || ./autogen.sh
         make distclean >/dev/null 2>&1 || true
+        CFLAGS="-O2 ${WOLFSSL_CFLAGS}" \
+        EXTRA_CFLAGS="-Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=maybe-uninitialized" \
         ./configure --prefix="${WOLFSSL_PREFIX}" \
             --enable-opensslall --enable-opensslextra --enable-dtls \
             --enable-aesgcm --enable-aesgcm-stream \
             --enable-aesni --enable-aesni-with-avx --enable-intelasm \
-            --enable-sp --enable-sp-asm --enable-intelrand \
+            --enable-sp --enable-sp-asm \
+            --enable-intelrand --enable-intelrdseed \
             --disable-harden --enable-sha384 --enable-sha512
         make -j"$(nproc)"
         make install

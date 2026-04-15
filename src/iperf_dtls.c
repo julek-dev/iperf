@@ -347,7 +347,18 @@ iperf_dtls_accept(struct iperf_test *test)
         i_errno = IESTREAMACCEPT;
         return -1;
     }
+    /*
+     * Tell the BIO the peer address in two ways: SET_CONNECTED tells
+     * OpenSSL the underlying socket is connect()'d (so use send(),
+     * not sendto()); SET_PEER gives the dgram BIO a fallback peer it
+     * uses when it does call sendto().  wolfSSL's OpenSSL-compat BIO
+     * may not honor SET_CONNECTED and falls through to sendto() with
+     * an empty peer otherwise, which on Linux yields EINVAL during
+     * the handshake's alert send path.  Setting both is a no-op on
+     * OpenSSL and closes the gap on wolfSSL.
+     */
     (void) BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, &sa_peer);
+    (void) BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_PEER,      0, &sa_peer);
 
     ssl = SSL_new((SSL_CTX *) test->dtls_ctx);
     if (!ssl) {
@@ -437,7 +448,12 @@ iperf_dtls_connect(struct iperf_test *test)
     }
 
     if (getpeername(s, (struct sockaddr *) &peer, &peerlen) == 0) {
+        /* See the matching comment in iperf_dtls_accept: set both
+         * SET_CONNECTED (OpenSSL path) and SET_PEER (wolfSSL sendto
+         * fallback) so the BIO has the peer regardless of which code
+         * path the SSL library uses to emit datagrams. */
         (void) BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, &peer);
+        (void) BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_PEER,      0, &peer);
     }
 
     ssl = SSL_new((SSL_CTX *) test->dtls_ctx);

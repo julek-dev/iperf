@@ -26,6 +26,10 @@ src/t_units
 src/t_uuid
 src/t_api
 src/t_auth
+# make check outputs (automake test harness)
+src/*.log
+src/*.trs
+src/test-suite.log
 examples/.libs
 examples/Makefile
 examples/mic

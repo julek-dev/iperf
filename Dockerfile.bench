@@ -39,8 +39,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- wolfSSL with full Intel-ASM flag set ---
-ARG WOLFSSL_REPO=https://github.com/julek-dev/wolfssl.git
-ARG WOLFSSL_REF=claude/dtls-performance-testing-uG1IV
+# Pull from upstream.  Pin with --build-arg WOLFSSL_REF=v5.7.4-stable (or
+# any other tag/commit) if you need byte-reproducible results.
+ARG WOLFSSL_REPO=https://github.com/wolfSSL/wolfssl.git
+ARG WOLFSSL_REF=master
 RUN set -eux; \
     git clone --depth 1 --branch "${WOLFSSL_REF}" "${WOLFSSL_REPO}" /src/wolfssl; \
     cd /src/wolfssl; \

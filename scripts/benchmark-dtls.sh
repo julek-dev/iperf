@@ -1,33 +1,34 @@
 #!/bin/bash
-# benchmark-dtls.sh -- reproduce the DTLS 1.2 performance measurements
-# for iperf across three SSL backends on loopback.
+# benchmark-dtls.sh -- self-contained reproducer for iperf's DTLS 1.2
+# loopback benchmark.
 #
 # What it does:
-#   1. Builds wolfSSL (from ../wolfssl or $WOLFSSL_SRC) with the Intel-
-#      optimized flag set that produces parity with OpenSSL.
-#   2. Fetches and builds OpenSSL 1.1.1w from source.
+#   1. Clones wolfSSL from upstream (github.com/wolfSSL/wolfssl) into
+#      $BENCH_DIR/src and builds it with the Intel-optimized flag set
+#      that produces parity with OpenSSL.
+#   2. Downloads and builds OpenSSL 1.1.1w from upstream.
 #   3. Leaves the distro OpenSSL 3 alone and uses it as-is.
-#   4. Builds three iperf3 variants from the current source tree, one
-#      per SSL backend.
+#   4. Builds three iperf3 variants from the current source tree (one
+#      per SSL backend) -- each with its own libiperf.so shim under
+#      $BENCH_DIR/bin/ so the variants don't collide at runtime.
 #   5. Runs two benchmark sweeps on loopback:
-#        - Single-core pinned (pin_cli, pin_srv) for UDP, DTLS-OpenSSL,
-#          DTLS-wolfSSL.
-#        - Multi-thread (-P 1/2/4/8) for UDP + all three DTLS stacks.
-#   6. Prints a combined summary table.
+#        - Single-core pinned (pin_cli / pin_srv) for UDP + the three
+#          DTLS stacks.
+#        - Multi-thread (-P 1/2/4/8) for the same four stacks.
+#   6. Prints a formatted summary and keeps every run's iperf3 JSON
+#      under $RESULTS_DIR/.
 #
-# All artefacts go under $BENCH_DIR (default /tmp/iperf-dtls-bench).
-# The script is idempotent -- each build step is skipped if its output
-# is already present.  Override any step by removing its artefacts and
-# rerunning.
-#
-# Required: autotools, make, perl, gcc, openssl (for the throwaway
-# cert), python3, curl, git.
+# Everything lives under a single $BENCH_DIR (default: a new mktemp
+# directory so repeated runs don't collide).  The script is idempotent:
+# each step is skipped if its output already exists.  Re-run with
+# BENCH_DIR pointed at the previous tree to avoid rebuilding anything.
 #
 # Usage:
-#     ./scripts/benchmark-dtls.sh                 # full sweep
+#     ./scripts/benchmark-dtls.sh                       # full sweep
 #     DUR=10 PARALLELS="1 4" ./scripts/benchmark-dtls.sh
-#     SKIP_PINNED=1 ./scripts/benchmark-dtls.sh   # just the -P sweep
-#     SKIP_PARALLEL=1 ./scripts/benchmark-dtls.sh # just the pinned sweep
+#     SKIP_PINNED=1   ./scripts/benchmark-dtls.sh       # only the -P sweep
+#     SKIP_PARALLEL=1 ./scripts/benchmark-dtls.sh       # only the pinned sweep
+#     BENCH_DIR=$HOME/dtls-bench ./scripts/benchmark-dtls.sh   # persistent
 
 set -euo pipefail
 
@@ -35,25 +36,33 @@ set -euo pipefail
 DUR="${DUR:-30}"
 BLKSZ="${BLKSZ:-1200}"
 PARALLELS="${PARALLELS:-1 2 4 8}"
-BENCH_DIR="${BENCH_DIR:-/tmp/iperf-dtls-bench}"
+
+# Default BENCH_DIR to a fresh temp dir so repeated invocations don't
+# collide; override for persistent/incremental runs.
+BENCH_DIR="${BENCH_DIR:-$(mktemp -d -t iperf-dtls-bench.XXXXXX)}"
 
 IPERF_SRC="${IPERF_SRC:-$(cd "$(dirname "$0")/.." && pwd)}"
-WOLFSSL_SRC="${WOLFSSL_SRC:-$(cd "$IPERF_SRC/../wolfssl" 2>/dev/null && pwd || echo '')}"
+
+# Upstream source locations.  Pin WOLFSSL_REF / OPENSSL11_URL for
+# reproducible runs across time.
+WOLFSSL_REPO="${WOLFSSL_REPO:-https://github.com/wolfSSL/wolfssl.git}"
+WOLFSSL_REF="${WOLFSSL_REF:-master}"
+OPENSSL11_URL="${OPENSSL11_URL:-https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz}"
+
 WOLFSSL_PREFIX="${WOLFSSL_PREFIX:-${BENCH_DIR}/install/wolfssl}"
 OPENSSL11_PREFIX="${OPENSSL11_PREFIX:-${BENCH_DIR}/install/openssl11}"
-OPENSSL11_URL="${OPENSSL11_URL:-https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz}"
 
 CERT="${BENCH_DIR}/cert.pem"
 KEY="${BENCH_DIR}/key.pem"
 RESULTS_DIR="${BENCH_DIR}/results"
 
-# Binary paths under BENCH_DIR
-BIN_OPENSSL3="${BENCH_DIR}/bin/iperf3-openssl3"
-BIN_OPENSSL11="${BENCH_DIR}/bin/iperf3-openssl11"
-BIN_WOLFSSL="${BENCH_DIR}/bin/iperf3-wolfssl"
-LIB_OPENSSL3="${BENCH_DIR}/bin/openssl3-lib"
-LIB_OPENSSL11="${BENCH_DIR}/bin/openssl11-lib"
-LIB_WOLFSSL="${BENCH_DIR}/bin/wolfssl-lib"
+BIN_DIR="${BENCH_DIR}/bin"
+BIN_OPENSSL3="${BIN_DIR}/iperf3-openssl3"
+BIN_OPENSSL11="${BIN_DIR}/iperf3-openssl11"
+BIN_WOLFSSL="${BIN_DIR}/iperf3-wolfssl"
+LIB_OPENSSL3="${BIN_DIR}/openssl3-lib"
+LIB_OPENSSL11="${BIN_DIR}/openssl11-lib"
+LIB_WOLFSSL="${BIN_DIR}/wolfssl-lib"
 
 # -------------------------------------------------------------- helpers
 log()  { printf '\033[1;34m[bench]\033[0m %s\n' "$*"; }
@@ -67,41 +76,42 @@ need() {
 }
 
 copy_iperf_build_into() {
-    # $1 = target binary, $2 = target libdir.  Copies the iperf3 binary
-    # and its libiperf.so companion from $IPERF_SRC/src/.libs into the
-    # bench tree so we get per-variant side-by-side binaries.
     local bin_dst="$1" lib_dst="$2"
     install -d "$(dirname "$bin_dst")" "$lib_dst"
-    cp "${IPERF_SRC}/src/.libs/iperf3"             "$bin_dst"
-    cp "${IPERF_SRC}/src/.libs/libiperf.so.0.0.0"  "${lib_dst}/libiperf.so.0"
+    cp "${IPERF_SRC}/src/.libs/iperf3"            "$bin_dst"
+    cp "${IPERF_SRC}/src/.libs/libiperf.so.0.0.0" "${lib_dst}/libiperf.so.0"
 }
 
 # ------------------------------------------------------------ preflight
-# Upfront: only the tools we *always* need.  Build-only tools are
-# checked lazily inside the wolfSSL / OpenSSL / iperf build blocks so
-# a reproducer image can ship pre-built artefacts and skip the
-# toolchain entirely.
+# Up front we only need the tools that are used on every invocation,
+# including re-runs that skip all builds.  Build-only tools are
+# required lazily inside each build block.
 need python3 taskset
 
-mkdir -p "${BENCH_DIR}/bin" "${BENCH_DIR}/install" "${RESULTS_DIR}"
+mkdir -p "${BIN_DIR}" "${BENCH_DIR}/install" "${BENCH_DIR}/src" "${RESULTS_DIR}"
 
 # Throwaway DTLS cert/key (reused across all runs)
 if [ ! -s "$CERT" ] || [ ! -s "$KEY" ]; then
     need openssl
-    log "generating throwaway DTLS cert"
+    log "generating throwaway DTLS cert under ${BENCH_DIR}"
     openssl req -x509 -nodes -newkey rsa:2048 \
         -keyout "$KEY" -out "$CERT" -days 1 \
         -subj '/CN=iperf-dtls-bench' >/dev/null 2>&1
 fi
 
 # ------------------------------------------------------------ wolfSSL
+WOLFSSL_SRC_DIR="${BENCH_DIR}/src/wolfssl"
+
 if [ ! -f "${WOLFSSL_PREFIX}/lib/libwolfssl.so" ]; then
-    need autoreconf make gcc perl
-    [ -n "${WOLFSSL_SRC}" ] || die "WOLFSSL_SRC not set and ../wolfssl not found"
-    [ -d "${WOLFSSL_SRC}" ] || die "wolfSSL source dir missing: ${WOLFSSL_SRC}"
-    log "building wolfSSL (prefix=${WOLFSSL_PREFIX})"
+    need git autoreconf make gcc perl
+    if [ ! -d "${WOLFSSL_SRC_DIR}" ]; then
+        log "cloning wolfSSL ${WOLFSSL_REF} from ${WOLFSSL_REPO}"
+        git clone --depth 1 --branch "${WOLFSSL_REF}" \
+            "${WOLFSSL_REPO}" "${WOLFSSL_SRC_DIR}"
+    fi
+    log "building wolfSSL -> ${WOLFSSL_PREFIX}"
     (
-        cd "${WOLFSSL_SRC}"
+        cd "${WOLFSSL_SRC_DIR}"
         [ -f configure ] || ./autogen.sh
         make distclean >/dev/null 2>&1 || true
         ./configure --prefix="${WOLFSSL_PREFIX}" \
@@ -118,17 +128,18 @@ else
 fi
 
 # ----------------------------------------------------------- OpenSSL 1.1.1
+OPENSSL11_SRC_DIR="${BENCH_DIR}/src/openssl-1.1.1w"
+
 if [ ! -f "${OPENSSL11_PREFIX}/lib/libssl.so.1.1" ]; then
     need curl make gcc perl
-    log "building OpenSSL 1.1.1w (prefix=${OPENSSL11_PREFIX})"
+    log "building OpenSSL 1.1.1w -> ${OPENSSL11_PREFIX}"
     (
-        mkdir -p "${BENCH_DIR}/src"
         cd "${BENCH_DIR}/src"
-        if [ ! -d openssl-1.1.1w ]; then
+        if [ ! -d "$(basename "${OPENSSL11_SRC_DIR}")" ]; then
             [ -f openssl-1.1.1w.tar.gz ] || curl -sSLO "${OPENSSL11_URL}"
             tar -xzf openssl-1.1.1w.tar.gz
         fi
-        cd openssl-1.1.1w
+        cd "$(basename "${OPENSSL11_SRC_DIR}")"
         ./config --prefix="${OPENSSL11_PREFIX}" \
                  --openssldir="${OPENSSL11_PREFIX}/ssl" shared >/dev/null
         make -j"$(nproc)"
@@ -158,11 +169,11 @@ build_iperf_variant() {
     copy_iperf_build_into "$bin" "$lib"
 }
 
-build_iperf_variant openssl3  "--with-openssl=/usr"                  "$BIN_OPENSSL3"  "$LIB_OPENSSL3"
-build_iperf_variant openssl11 "--with-openssl=${OPENSSL11_PREFIX}"   "$BIN_OPENSSL11" "$LIB_OPENSSL11"
-build_iperf_variant wolfssl   "--with-wolfssl=${WOLFSSL_PREFIX}"     "$BIN_WOLFSSL"   "$LIB_WOLFSSL"
+build_iperf_variant openssl3  "--with-openssl=/usr"                "$BIN_OPENSSL3"  "$LIB_OPENSSL3"
+build_iperf_variant openssl11 "--with-openssl=${OPENSSL11_PREFIX}" "$BIN_OPENSSL11" "$LIB_OPENSSL11"
+build_iperf_variant wolfssl   "--with-wolfssl=${WOLFSSL_PREFIX}"   "$BIN_WOLFSSL"   "$LIB_WOLFSSL"
 
-# Leave the iperf tree clean on exit (configure/make regenerates
+# Leave the iperf tree clean on exit (configure / autoreconf regenerate
 # autotools files; revert them so the user's working tree is tidy).
 cleanup_iperf_tree() {
     git -C "${IPERF_SRC}" checkout -- \
@@ -181,8 +192,7 @@ LD_OPENSSL11="${LIB_OPENSSL11}:${OPENSSL11_PREFIX}/lib"
 LD_WOLFSSL="${LIB_WOLFSSL}:${WOLFSSL_PREFIX}/lib"
 
 parse_cli_json() {
-    # $1 = iperf3 client JSON.  Emits one pipe-separated record with
-    # throughput, loss percent, and reported CPU percentages.
+    # $1 = iperf3 client JSON
     python3 - "$1" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -202,8 +212,7 @@ PY
 run_once() {
     # $1 = label, $2 = tag (pin_cli / pin_srv / P=N),
     # $3 = binary, $4 = LD_LIBRARY_PATH, $5 = cli pin prefix,
-    # $6 = srv pin prefix, $7 = extra cli args,
-    # $8 = "dtls" | "udp".
+    # $6 = srv pin prefix, $7 = extra cli args, $8 = "dtls" | "udp".
     local label="$1" tag="$2" bin="$3" libpath="$4"
     local cli_pin="$5" srv_pin="$6" extra_cli="$7" proto="$8"
     local port=$((18000 + RANDOM % 1000))
@@ -227,14 +236,12 @@ run_once() {
     wait "$pid" 2>/dev/null || true
     if [ "$rc" -ne 0 ] || [ ! -s "$cli_json" ]; then
         printf '%-16s %-8s  CLIENT FAILED (rc=%d)\n' "$label" "$tag" "$rc"
-        # Surface whatever the iperf3 binary wrote so the user sees why.
         if [ -s "$cli_err" ]; then
             sed 's/^/    cli-stderr: /' "$cli_err" | head -5
         fi
         if [ -s "$srv_err" ]; then
             sed 's/^/    srv-stderr: /' "$srv_err" | head -5
         fi
-        # Don't abort the whole sweep -- other stacks may still work.
         return 0
     fi
     local line
@@ -246,7 +253,7 @@ run_once() {
         "$usrv" "$ssrv" "$(python3 -c "print($usrv+$ssrv)")"
 }
 
-# --------------------------------------------------------- scenario: pinned
+# --------------------------------------------------------- pinned sweep
 run_pinned_sweep() {
     log "pinned single-core sweep (DUR=${DUR}s, BLKSZ=${BLKSZ})"
     printf '%-16s %-8s  %14s   %-12s   %-46s   %s\n' \
@@ -266,7 +273,7 @@ run_pinned_sweep() {
     done
 }
 
-# -------------------------------------------------------- scenario: -P sweep
+# -------------------------------------------------------- parallel sweep
 run_parallel_sweep() {
     log "multi-thread sweep (DUR=${DUR}s, BLKSZ=${BLKSZ}, PARALLELS=${PARALLELS})"
     printf '%-16s %-8s  %14s   %-12s   %-46s   %s\n' \
@@ -281,14 +288,7 @@ run_parallel_sweep() {
     done
 }
 
-# -------------------------------------------------------------------- main
-log "host: $(nproc) logical cores"
-log "bench dir: ${BENCH_DIR}"
-echo
-
-# Quick sanity sweep: 2-second DTLS run per stack so that any
-# "library can't even complete a handshake" problems surface before we
-# commit to 10+ minutes of measurement.
+# --------------------------------------------------------- DTLS preflight
 preflight_dtls_stack() {
     local label="$1" bin="$2" libpath="$3"
     local DUR_SAVED="$DUR"
@@ -297,18 +297,24 @@ preflight_dtls_stack() {
     run_once "preflight-${label}" "smoke" "$bin" "$libpath" "" "" "" dtls >/dev/null \
         || true
     DUR="$DUR_SAVED"
-    # Sniff whether it wrote a usable JSON
     local cli_json="${RESULTS_DIR}/preflight-${label}_smoke_cli.json"
     if [ ! -s "$cli_json" ]; then
         warn "${label}: no client JSON produced -- stack may be broken"
-        cat "${RESULTS_DIR}/preflight-${label}_smoke_cli.err" 2>/dev/null \
-            | head -8 | sed 's/^/    cli-stderr: /'
-        cat "${RESULTS_DIR}/preflight-${label}_smoke_srv.err" 2>/dev/null \
-            | head -8 | sed 's/^/    srv-stderr: /'
+        [ -s "${RESULTS_DIR}/preflight-${label}_smoke_cli.err" ] \
+            && head -8 "${RESULTS_DIR}/preflight-${label}_smoke_cli.err" \
+               | sed 's/^/    cli-stderr: /'
+        [ -s "${RESULTS_DIR}/preflight-${label}_smoke_srv.err" ] \
+            && head -8 "${RESULTS_DIR}/preflight-${label}_smoke_srv.err" \
+               | sed 's/^/    srv-stderr: /'
         return 1
     fi
     return 0
 }
+
+# -------------------------------------------------------------------- main
+log "host: $(nproc) logical cores"
+log "bench dir: ${BENCH_DIR}"
+echo
 
 if [ "${SKIP_PREFLIGHT:-0}" != 1 ]; then
     preflight_dtls_stack dtls-openssl3    "$BIN_OPENSSL3"  "$LD_OPENSSL3"   || true
@@ -321,3 +327,4 @@ fi
 [ "${SKIP_PARALLEL:-0}" = 1 ] || run_parallel_sweep
 
 log "done. raw per-run JSON kept in ${RESULTS_DIR}/"
+log "re-run with BENCH_DIR=${BENCH_DIR} to skip the rebuilds."

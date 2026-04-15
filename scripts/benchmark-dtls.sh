@@ -77,12 +77,17 @@ copy_iperf_build_into() {
 }
 
 # ------------------------------------------------------------ preflight
-need autoreconf make gcc perl openssl python3 curl taskset
+# Upfront: only the tools we *always* need.  Build-only tools are
+# checked lazily inside the wolfSSL / OpenSSL / iperf build blocks so
+# a reproducer image can ship pre-built artefacts and skip the
+# toolchain entirely.
+need python3 taskset
 
 mkdir -p "${BENCH_DIR}/bin" "${BENCH_DIR}/install" "${RESULTS_DIR}"
 
 # Throwaway DTLS cert/key (reused across all runs)
 if [ ! -s "$CERT" ] || [ ! -s "$KEY" ]; then
+    need openssl
     log "generating throwaway DTLS cert"
     openssl req -x509 -nodes -newkey rsa:2048 \
         -keyout "$KEY" -out "$CERT" -days 1 \
@@ -91,6 +96,7 @@ fi
 
 # ------------------------------------------------------------ wolfSSL
 if [ ! -f "${WOLFSSL_PREFIX}/lib/libwolfssl.so" ]; then
+    need autoreconf make gcc perl
     [ -n "${WOLFSSL_SRC}" ] || die "WOLFSSL_SRC not set and ../wolfssl not found"
     [ -d "${WOLFSSL_SRC}" ] || die "wolfSSL source dir missing: ${WOLFSSL_SRC}"
     log "building wolfSSL (prefix=${WOLFSSL_PREFIX})"
@@ -113,6 +119,7 @@ fi
 
 # ----------------------------------------------------------- OpenSSL 1.1.1
 if [ ! -f "${OPENSSL11_PREFIX}/lib/libssl.so.1.1" ]; then
+    need curl make gcc perl
     log "building OpenSSL 1.1.1w (prefix=${OPENSSL11_PREFIX})"
     (
         mkdir -p "${BENCH_DIR}/src"
@@ -138,6 +145,7 @@ build_iperf_variant() {
         log "iperf/${label} already built"
         return
     fi
+    need autoreconf make gcc
     log "building iperf/${label}  (${configure_args})"
     (
         cd "${IPERF_SRC}"

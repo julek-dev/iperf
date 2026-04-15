@@ -231,16 +231,26 @@ run_once() {
     LD_LIBRARY_PATH="$libpath" $srv_pin "$bin" "${srv_args[@]}" >"$srv_json" 2>"$srv_err" &
     local pid=$!
     sleep 0.6
-    LD_LIBRARY_PATH="$libpath" $cli_pin "$bin" "${cli_args[@]}" >"$cli_json" 2>"$cli_err"
-    local rc=$?
+    # Can't use `cmd; rc=$?` under `set -e` -- a non-zero exit aborts
+    # the script *before* the rc assignment runs, and the caller never
+    # sees the failure.  Explicitly tolerate failure on this line.
+    local rc=0
+    LD_LIBRARY_PATH="$libpath" $cli_pin "$bin" "${cli_args[@]}" \
+        >"$cli_json" 2>"$cli_err" || rc=$?
     wait "$pid" 2>/dev/null || true
     if [ "$rc" -ne 0 ] || [ ! -s "$cli_json" ]; then
         printf '%-16s %-8s  CLIENT FAILED (rc=%d)\n' "$label" "$tag" "$rc"
+        # Surface the first few lines of whatever each side wrote to
+        # stderr.  Use `head | sed` (not `sed | head`) so the consumer
+        # end of the pipe closes first; otherwise on a long error file
+        # sed gets SIGPIPE, pipefail propagates non-zero, and the
+        # enclosing `set -e` would kill the whole sweep before we reach
+        # the `return 0` below.
         if [ -s "$cli_err" ]; then
-            sed 's/^/    cli-stderr: /' "$cli_err" | head -5
+            head -n 5 "$cli_err" | sed 's/^/    cli-stderr: /'
         fi
         if [ -s "$srv_err" ]; then
-            sed 's/^/    srv-stderr: /' "$srv_err" | head -5
+            head -n 5 "$srv_err" | sed 's/^/    srv-stderr: /'
         fi
         return 0
     fi
@@ -300,12 +310,15 @@ preflight_dtls_stack() {
     local cli_json="${RESULTS_DIR}/preflight-${label}_smoke_cli.json"
     if [ ! -s "$cli_json" ]; then
         warn "${label}: no client JSON produced -- stack may be broken"
-        [ -s "${RESULTS_DIR}/preflight-${label}_smoke_cli.err" ] \
-            && head -8 "${RESULTS_DIR}/preflight-${label}_smoke_cli.err" \
-               | sed 's/^/    cli-stderr: /'
-        [ -s "${RESULTS_DIR}/preflight-${label}_smoke_srv.err" ] \
-            && head -8 "${RESULTS_DIR}/preflight-${label}_smoke_srv.err" \
-               | sed 's/^/    srv-stderr: /'
+        # `head | sed` (not `sed | head`): see note in run_once.
+        if [ -s "${RESULTS_DIR}/preflight-${label}_smoke_cli.err" ]; then
+            head -n 8 "${RESULTS_DIR}/preflight-${label}_smoke_cli.err" \
+                | sed 's/^/    cli-stderr: /'
+        fi
+        if [ -s "${RESULTS_DIR}/preflight-${label}_smoke_srv.err" ]; then
+            head -n 8 "${RESULTS_DIR}/preflight-${label}_smoke_srv.err" \
+                | sed 's/^/    srv-stderr: /'
+        fi
         return 1
     fi
     return 0

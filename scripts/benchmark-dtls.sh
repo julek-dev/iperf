@@ -29,6 +29,15 @@
 #     SKIP_PINNED=1   ./scripts/benchmark-dtls.sh       # only the -P sweep
 #     SKIP_PARALLEL=1 ./scripts/benchmark-dtls.sh       # only the pinned sweep
 #     BENCH_DIR=$HOME/dtls-bench ./scripts/benchmark-dtls.sh   # persistent
+#
+#     # Profile the pinned side with perf(1) (produces per-run
+#     # <label>_<scn>_<side>.perf.data files under $RESULTS_DIR).
+#     # Requires linux-tools-generic installed and
+#     # kernel.perf_event_paranoid <= 2 (root) or <= 1 (unprivileged).
+#     PERF_RECORD=1 SKIP_PARALLEL=1 DUR=60 ./scripts/benchmark-dtls.sh
+#     # Customize perf args if you want DWARF unwinding or PMU events:
+#     PERF_RECORD=1 PERF_ARGS='-F 999 --call-graph dwarf -e cycles,instructions' \
+#         ./scripts/benchmark-dtls.sh
 
 set -euo pipefail
 
@@ -42,6 +51,22 @@ PARALLELS="${PARALLELS:-1 2 4 8}"
 BENCH_DIR="${BENCH_DIR:-$(mktemp -d -t iperf-dtls-bench.XXXXXX)}"
 
 IPERF_SRC="${IPERF_SRC:-$(cd "$(dirname "$0")/.." && pwd)}"
+
+# Optional `perf record` wrapping for the pinned single-core sweep.
+# When PERF_RECORD=1, the side that's bound to core 0 is run under
+#     perf record $PERF_ARGS -o <label>_<tag>_<side>.perf.data
+# and the resulting file is dropped into $RESULTS_DIR/ for offline
+# analysis (`perf report -i <file>`, FlameGraph, etc.).  The other
+# side runs unwrapped.  Only the pinned sweep is instrumented; the
+# preflight + -P sweeps are not, since those scenarios don't have a
+# single saturated core of interest.
+#
+# Default PERF_ARGS uses frame-pointer call graphs for lightweight
+# sampling; override to "--call-graph dwarf" for better unwinding
+# if the binaries are built without -fomit-frame-pointer (which is
+# true for iperf but not necessarily for libssl/libwolfssl).
+PERF_RECORD="${PERF_RECORD:-0}"
+PERF_ARGS="${PERF_ARGS:--F 999 --call-graph fp}"
 
 # Upstream source locations.  Pin WOLFSSL_REF / OPENSSL11_URL for
 # reproducible runs across time.  WOLFSSL_REF defaults to the last
@@ -238,14 +263,32 @@ PY
 run_once() {
     # $1 = label, $2 = tag (pin_cli / pin_srv / P=N),
     # $3 = binary, $4 = LD_LIBRARY_PATH, $5 = cli pin prefix,
-    # $6 = srv pin prefix, $7 = extra cli args, $8 = "dtls" | "udp".
+    # $6 = srv pin prefix, $7 = extra cli args, $8 = "dtls" | "udp",
+    # $9 = perf side: "cli" / "srv" / "" (only honoured when PERF_RECORD=1).
     local label="$1" tag="$2" bin="$3" libpath="$4"
     local cli_pin="$5" srv_pin="$6" extra_cli="$7" proto="$8"
+    local perf_side="${9:-}"
     local port=$((18000 + RANDOM % 1000))
     local cli_json="${RESULTS_DIR}/${label}_${tag}_cli.json"
     local srv_json="${RESULTS_DIR}/${label}_${tag}_srv.json"
     local cli_err="${RESULTS_DIR}/${label}_${tag}_cli.err"
     local srv_err="${RESULTS_DIR}/${label}_${tag}_srv.err"
+
+    # Optional perf-record wrapping.  We wrap the *outer* invocation with
+    # perf (perf launches taskset launches iperf3) so perf itself isn't
+    # pinned to the same core it is sampling.
+    local cli_perf="" srv_perf=""
+    if [ "${PERF_RECORD:-0}" = 1 ]; then
+        local perf_data
+        if [ "$perf_side" = "cli" ]; then
+            perf_data="${RESULTS_DIR}/${label}_${tag}_cli.perf.data"
+            cli_perf="perf record $PERF_ARGS -o $perf_data -- "
+        elif [ "$perf_side" = "srv" ]; then
+            perf_data="${RESULTS_DIR}/${label}_${tag}_srv.perf.data"
+            srv_perf="perf record $PERF_ARGS -o $perf_data -- "
+        fi
+    fi
+
     local srv_args cli_args
     if [ "$proto" = "dtls" ]; then
         srv_args=(-s -p "$port" -J --dtls --dtls-cert "$CERT" --dtls-key "$KEY" -1)
@@ -254,14 +297,14 @@ run_once() {
         srv_args=(-s -p "$port" -J -1)
         cli_args=(-c 127.0.0.1 -p "$port" -J -u -l "$BLKSZ" -b 0 -t "$DUR" $extra_cli)
     fi
-    LD_LIBRARY_PATH="$libpath" $srv_pin "$bin" "${srv_args[@]}" >"$srv_json" 2>"$srv_err" &
+    LD_LIBRARY_PATH="$libpath" $srv_perf $srv_pin "$bin" "${srv_args[@]}" >"$srv_json" 2>"$srv_err" &
     local pid=$!
     sleep 0.6
     # Can't use `cmd; rc=$?` under `set -e` -- a non-zero exit aborts
     # the script *before* the rc assignment runs, and the caller never
     # sees the failure.  Explicitly tolerate failure on this line.
     local rc=0
-    LD_LIBRARY_PATH="$libpath" $cli_pin "$bin" "${cli_args[@]}" \
+    LD_LIBRARY_PATH="$libpath" $cli_perf $cli_pin "$bin" "${cli_args[@]}" \
         >"$cli_json" 2>"$cli_err" || rc=$?
     wait "$pid" 2>/dev/null || true
     if [ "$rc" -ne 0 ] || [ ! -s "$cli_json" ]; then
@@ -296,15 +339,15 @@ run_pinned_sweep() {
         label scenario throughput loss 'client CPU' 'server CPU'
     echo "# ---------------------------------------------------------------------------------------------------------------------------------"
     for scn in pin_cli pin_srv; do
-        local cpin="" spin=""
+        local cpin="" spin="" perf_side=""
         case "$scn" in
-            pin_cli) cpin="taskset -c 0" ;;
-            pin_srv) spin="taskset -c 0" ;;
+            pin_cli) cpin="taskset -c 0"; perf_side="cli" ;;
+            pin_srv) spin="taskset -c 0"; perf_side="srv" ;;
         esac
-        run_once udp-plain        "$scn" "$BIN_OPENSSL3"  "$LD_OPENSSL3"  "$cpin" "$spin" "" udp
-        run_once dtls-openssl3    "$scn" "$BIN_OPENSSL3"  "$LD_OPENSSL3"  "$cpin" "$spin" "" dtls
-        run_once dtls-openssl111  "$scn" "$BIN_OPENSSL11" "$LD_OPENSSL11" "$cpin" "$spin" "" dtls
-        run_once dtls-wolfssl     "$scn" "$BIN_WOLFSSL"   "$LD_WOLFSSL"   "$cpin" "$spin" "" dtls
+        run_once udp-plain        "$scn" "$BIN_OPENSSL3"  "$LD_OPENSSL3"  "$cpin" "$spin" "" udp  "$perf_side"
+        run_once dtls-openssl3    "$scn" "$BIN_OPENSSL3"  "$LD_OPENSSL3"  "$cpin" "$spin" "" dtls "$perf_side"
+        run_once dtls-openssl111  "$scn" "$BIN_OPENSSL11" "$LD_OPENSSL11" "$cpin" "$spin" "" dtls "$perf_side"
+        run_once dtls-wolfssl     "$scn" "$BIN_WOLFSSL"   "$LD_WOLFSSL"   "$cpin" "$spin" "" dtls "$perf_side"
         echo
     done
 }
@@ -372,6 +415,21 @@ for v in openssl3 openssl11 wolfssl; do
         fi
     fi
 done
+
+if [ "${PERF_RECORD}" = 1 ]; then
+    if ! command -v perf >/dev/null 2>&1; then
+        warn "PERF_RECORD=1 but 'perf' is not on PATH -- install linux-tools (e.g. 'apt install linux-tools-generic') and try again"
+        PERF_RECORD=0
+    else
+        log "PERF_RECORD=1 (perf $(perf --version 2>&1 | head -1 | awk '{print $3}')): wrapping the pinned side with 'perf record ${PERF_ARGS}'"
+        if [ -r /proc/sys/kernel/perf_event_paranoid ]; then
+            pp=$(cat /proc/sys/kernel/perf_event_paranoid)
+            if [ "$pp" -gt 2 ]; then
+                warn "perf_event_paranoid=$pp: unprivileged sampling may be blocked; consider 'sysctl kernel.perf_event_paranoid=1'"
+            fi
+        fi
+    fi
+fi
 echo
 
 if [ "${SKIP_PREFLIGHT:-0}" != 1 ]; then
@@ -386,3 +444,21 @@ fi
 
 log "done. raw per-run JSON kept in ${RESULTS_DIR}/"
 log "re-run with BENCH_DIR=${BENCH_DIR} to skip the rebuilds."
+
+# Summarise any perf.data captures.
+if [ "${PERF_RECORD}" = 1 ]; then
+    mapfile -t perf_files < <(find "${RESULTS_DIR}" -maxdepth 1 -name '*.perf.data' 2>/dev/null | sort)
+    if [ "${#perf_files[@]}" -gt 0 ]; then
+        echo
+        log "perf captures (${#perf_files[@]}):"
+        for f in "${perf_files[@]}"; do
+            sz=$(du -h "$f" | cut -f1)
+            printf '    %s  (%s)\n' "$f" "$sz"
+        done
+        echo
+        log "analyse with:"
+        echo "    perf report      -i ${perf_files[0]}"
+        echo "    perf annotate    -i ${perf_files[0]}"
+        echo "    perf script      -i ${perf_files[0]}  # raw samples for FlameGraph etc."
+    fi
+fi

@@ -122,6 +122,15 @@ if [ ! -f "${WOLFSSL_PREFIX}/lib/libwolfssl.so" ]; then
     # GCM table (-DGCM_TABLE) did not help -- the hot path is in
     # hand-written .S that GCC optimization doesn't touch, and GHASH
     # uses PCLMULQDQ at runtime which is faster than any table.
+    #
+    # --enable-ipv6 is required even if you're only testing on IPv4
+    # loopback: without it, wolfSSL_BIO_ADDR_size() returns 0 for
+    # AF_INET6 peers and BIO_CTRL_DGRAM_SET_PEER silently becomes a
+    # no-op.  On hosts where getaddrinfo/connect resolves the server
+    # as AF_INET6 (e.g. systems where "127.0.0.1" gets delivered via
+    # IPv4-mapped-IPv6, or where ::1 is preferred), the handshake
+    # fails at SSL_accept with SOCKET_ERROR_E (-308) / EINVAL because
+    # the BIO has no peer to sendto.
     : "${WOLFSSL_CFLAGS:=-march=native}"
     (
         cd "${WOLFSSL_SRC_DIR}"
@@ -131,6 +140,7 @@ if [ ! -f "${WOLFSSL_PREFIX}/lib/libwolfssl.so" ]; then
         EXTRA_CFLAGS="-Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=maybe-uninitialized" \
         ./configure --prefix="${WOLFSSL_PREFIX}" \
             --enable-opensslall --enable-opensslextra --enable-dtls \
+            --enable-ipv6 \
             --enable-aesgcm --enable-aesgcm-stream \
             --enable-aesni --enable-aesni-with-avx --enable-intelasm \
             --enable-sp --enable-sp-asm \

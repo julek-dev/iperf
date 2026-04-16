@@ -360,6 +360,12 @@ iperf_dtls_accept(struct iperf_test *test)
     (void) BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, &sa_peer);
     (void) BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_PEER,      0, &sa_peer);
 
+    /* Build-marker: lets users verify a binary contains this path. */
+    if (getenv("IPERF_DTLS_DEBUG"))
+        fprintf(stderr,
+                "iperf DTLS: accept using connect()+SET_CONNECTED+SET_PEER "
+                "(fix-v2)\n");
+
     ssl = SSL_new((SSL_CTX *) test->dtls_ctx);
     if (!ssl) {
         dtls_report_error("SSL_new");

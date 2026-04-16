@@ -343,6 +343,25 @@ preflight_dtls_stack() {
 # -------------------------------------------------------------------- main
 log "host: $(nproc) logical cores"
 log "bench dir: ${BENCH_DIR}"
+# Print iperf repo info + verify the per-variant binaries contain the
+# known-good DTLS fix marker.  If a user forgot to pull (or their old
+# artefacts cache got reused), the marker will be absent and this
+# message tells them directly rather than leaving them to guess.
+if git -C "${IPERF_SRC}" rev-parse --short HEAD >/dev/null 2>&1; then
+    log "iperf source HEAD:  $(git -C "${IPERF_SRC}" rev-parse --short HEAD)  ($(git -C "${IPERF_SRC}" log -1 --format=%s HEAD))"
+fi
+for v in openssl3 openssl11 wolfssl; do
+    lib="${BENCH_DIR}/bin/${v}-lib/libiperf.so.0"
+    if [ -f "$lib" ]; then
+        # grep -a scans the binary directly (no strings|grep pipe under
+        # pipefail to worry about SIGPIPE on early-exit grep -q).
+        if grep -aq 'fix-v2' "$lib" 2>/dev/null; then
+            log "iperf/${v}: binary contains DTLS fix-v2 marker (rebuild OK)"
+        else
+            warn "iperf/${v}: binary MISSING DTLS fix-v2 marker -- stale; remove ${BENCH_DIR}/bin/iperf3-${v} ${BENCH_DIR}/bin/${v}-lib and rerun"
+        fi
+    fi
+done
 echo
 
 if [ "${SKIP_PREFLIGHT:-0}" != 1 ]; then
